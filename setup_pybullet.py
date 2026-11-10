@@ -127,9 +127,71 @@ class Simulation(Simulation_base):
         
     
 
+def sync_pinocchio_dynamics(pinocchiorobot, sim):
+    """Use Bullet's loaded rigid-body inertias in the control model.
+
+    Bullet assigns default inertia to links without an URDF <inertial>
+    element; here that includes the two EFF frame-only links. It can also
+    recompute rotational inertias from collision shapes. Match the actual
+    imported masses, COMs and inertia tensors instead of changing the scene.
+
+    Kinematic structure, joint order, placements and geometry stay intact.
+    Pinocchio fixed-link inertias must be accumulated on their parent joints.
+
+    References:
+    https://github.com/bulletphysics/bullet3/blob/master/examples/Importers/ImportURDFDemo/UrdfParser.cpp
+    https://github.com/bulletphysics/bullet3/blob/master/docs/pybullet_quickstart_guide/PyBulletQuickstartGuide.md.html
+    """
+    model = pinocchiorobot.model.copy()
+    bodies = [(sim.p.getBodyInfo(sim.robot)[0].decode(), -1)]
+    bodies += [(sim.p.getJointInfo(sim.robot, i)[12].decode(), i)
+               for i in range(sim.p.getNumJoints(sim.robot))]
+    inertias = [pin.Inertia.Zero() for _ in range(model.njoints)]
+    marker_masses = {}
+    for name, index in bodies:
+        frame_id = model.getFrameId(name)
+        if frame_id >= model.nframes:
+            raise RuntimeError("Bullet body has no Pinocchio frame: " + name)
+        frame = model.frames[frame_id]
+        properties = sim.p.getDynamicsInfo(sim.robot, index)
+        mass = float(properties[0])
+        diagonal = np.asarray(properties[2], dtype=float)
+        local_position = np.asarray(properties[3], dtype=float)
+        local_quaternion = np.asarray(properties[4], dtype=float)
+        if (not np.isfinite(mass) or mass < 0
+                or diagonal.shape != (3,) or np.any(diagonal < 0)
+                or not np.all(np.isfinite(diagonal))
+                or local_position.shape != (3,)
+                or not np.all(np.isfinite(local_position))
+                or local_quaternion.shape != (4,)
+                or not np.all(np.isfinite(local_quaternion))
+                or not np.isclose(np.linalg.norm(local_quaternion), 1.0, atol=1e-6)):
+            raise RuntimeError("Invalid Bullet inertia for body: " + name)
+        # getDynamicsInfo supplies COM pose in the URDF link frame, and
+        # principal moments expressed in the local inertial frame.
+        local_com = pin.XYZQUATToSE3(np.r_[local_position, local_quaternion])
+        rotation = local_com.rotation
+        inertia_at_com = rotation @ np.diag(diagonal) @ rotation.T
+        body_inertia = pin.Inertia(mass, local_position, inertia_at_com)
+        parent = frame.parent
+        inertias[parent] = inertias[parent] + frame.placement.act(body_inertia)
+        if name in ("LARM_EFF_Link", "RARM_EFF_Link"):
+            marker_masses[name] = mass
+    for joint, inertia in enumerate(inertias):
+        model.inertias[joint] = inertia
+    # Recreate algorithm workspace after updating the inertial parameters.
+    pinocchiorobot.model = model
+    pinocchiorobot.data = model.createData()
+    sim.dynamics_sync_marker_masses = marker_masses
+    print("[DYNAMICS] Pinocchio control inertias matched to loaded Bullet bodies.")
+    for name, mass in marker_masses.items():
+        print(f"[DYNAMICS] {name}: Bullet mass={mass:g} kg, included in control model")
+
+
 def setuppybullet(pinocchiorobot):
     sim = Simulation(pinocchiorobot)    
     pyb.setTimeStep(DT)
+    sync_pinocchio_dynamics(pinocchiorobot, sim)
     return sim
 
 
