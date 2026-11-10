@@ -14,6 +14,10 @@ from config import LEFT_HOOK, RIGHT_HOOK, LEFT_HAND, RIGHT_HAND, EPSILON
 from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
 
 from tools import setcubeplacement
+DEBUG = False
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
 
 def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
     """Find a grasp configuration using iterative inverse kinematics."""
@@ -67,7 +71,7 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
             )
 
         if iteration % 50 == 0:
-            print(
+            debug_print(
                 f"Iteration {iteration}: "
                 f"position = {position_error:.6f} m, "
                 f"orientation = {orientation_error:.6f} rad"
@@ -79,8 +83,8 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
 
             in_collision = collision(robot, q)
 
-            print(f"Hands aligned after {iteration} iterations.")
-            print("Collision:", in_collision)
+            debug_print(f"Hands aligned after {iteration} iterations.")
+            debug_print("Collision:", in_collision)
 
             return q, not in_collision
 
@@ -114,7 +118,7 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
         q = pin.integrate(robot.model, q, step_size * dq)
         q = projecttojointlimits(robot, q)
 
-    print("Reached the iteration limit without aligning both hands.")
+    debug_print("Reached the iteration limit without aligning both hands.")
     return q, False
             
 if __name__ == "__main__":
