@@ -28,14 +28,14 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
     left_hook_id = cube.model.getFrameId(LEFT_HOOK)
     right_hook_id = cube.model.getFrameId(RIGHT_HOOK)
 
-    # The target poses remain fixed throughout the iterations.
+    # The target poses.
     pin.framesForwardKinematics(cube.model, cube.data, cube.q0)
     target_left = cubetarget * cube.data.oMf[left_hook_id]
     target_right = cubetarget * cube.data.oMf[right_hook_id]
 
     max_iterations = 500
     step_size = 0.1
-    damping = 1e-4
+    
 
     position_tolerance = 1e-3 # metres
     orientation_tolerance = 1e-3 # radians
@@ -105,10 +105,10 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
             pin.LOCAL
         ).copy()
 
-        # Tutorial 3 style: use hand Jacobians directly.
+       
         J_hand = np.vstack([J_hand_left, J_hand_right])
 
-        # Positive sign: request hand motion towards the targets.
+        #request hand motion towards the targets.(from tutorial3)
         dq = pinv(J_hand) @ error
 
         q = pin.integrate(robot.model, q, step_size * dq)
