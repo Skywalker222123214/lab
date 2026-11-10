@@ -37,8 +37,8 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
     step_size = 0.1
     damping = 1e-4
 
-    position_tolerance = 1e-3       # metres
-    orientation_tolerance = 1e-3    # radians
+    position_tolerance = 1e-3 # metres
+    orientation_tolerance = 1e-3 # radians
 
     for iteration in range(max_iterations + 1):
 
@@ -51,20 +51,20 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
         left_relative = current_left.inverse() * target_left
         right_relative = current_right.inverse() * target_right
 
-        error_left = pin.log6(left_relative).vector
-        error_right = pin.log6(right_relative).vector
+        error_left = pin.log(left_relative).vector
+        error_right = pin.log(right_relative).vector
         error = np.concatenate([error_left, error_right])
 
         # Check position and orientation separately for both hands.
         position_error = max(
-            np.linalg.norm(current_left.translation - target_left.translation),
-            np.linalg.norm(current_right.translation - target_right.translation)
-        )
+            norm(left_relative.translation),
+            norm(right_relative.translation)
+            )
 
         orientation_error = max(
-            np.linalg.norm(error_left[3:]),
-            np.linalg.norm(error_right[3:])
-        )
+            norm(error_left[3:]),
+            norm(error_right[3:])
+            )
 
         if iteration % 50 == 0:
             print(
@@ -75,7 +75,7 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
 
         # 3. Stop if both hands are aligned.
         if (position_error < position_tolerance
-                and orientation_error < orientation_tolerance):
+            and orientation_error < orientation_tolerance):
 
             in_collision = collision(robot, q)
 
@@ -89,30 +89,27 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
             break
 
         # 4. Compute the hand Jacobians.
-        pin.computeJointJacobians(robot.model, robot.data, q)
-
-        J_hand_left = pin.getFrameJacobian(
-            robot.model, robot.data,
-            left_hand_id, pin.ReferenceFrame.LOCAL
+        J_hand_left = pin.computeFrameJacobian(
+            robot.model,
+            robot.data,
+            q,
+            left_hand_id,
+            pin.LOCAL
         ).copy()
 
-        J_hand_right = pin.getFrameJacobian(
-            robot.model, robot.data,
-            right_hand_id, pin.ReferenceFrame.LOCAL
+        J_hand_right = pin.computeFrameJacobian(
+            robot.model,
+            robot.data,
+            q,
+            right_hand_id,
+            pin.LOCAL
         ).copy()
 
-        # Error Jacobians and damped update adapted from:
-        # https://gepetto.github.io/doc/pinocchio/doxygen-html/md_doc_b-examples_d-inverse-kinematics.html
-        J_error_left = -pin.Jlog6(left_relative.inverse()) @ J_hand_left
-        J_error_right = -pin.Jlog6(right_relative.inverse()) @ J_hand_right
+        # Tutorial 3 style: use hand Jacobians directly.
+        J_hand = np.vstack([J_hand_left, J_hand_right])
 
-        J = np.vstack([J_error_left, J_error_right])
-
-        # 5. Compute and apply a small adjustment.
-        dq = -J.T @ np.linalg.solve(
-            J @ J.T + damping * np.eye(12),
-            error
-        )
+        # Positive sign: request hand motion towards the targets.
+        dq = pinv(J_hand) @ error
 
         q = pin.integrate(robot.model, q, step_size * dq)
         q = projecttojointlimits(robot, q)
@@ -135,6 +132,7 @@ if __name__ == "__main__":
 
     # Display the initial grasp with the cube at its initial pose.
     setcubeplacement(robot, cube, CUBE_PLACEMENT)
+    pin.framesForwardKinematics(robot.model, robot.data, q0)
     updatevisuals(viz, robot, cube, q0)
 
     
