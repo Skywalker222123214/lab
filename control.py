@@ -10,9 +10,9 @@ import numpy as np
 import pinocchio as pin
 
 from trajectory import PathTrajectory
-from grasp_cycle import (ControlCycle, build_lift_reference, check_setup,
-                         check_initial_state, cycle_log, print_result,
-                         pause_simulation)
+from grasp_cycle import check_setup, check_initial_state, pause_simulation
+from transport import (PlannedTrajectory, TransportCycle, validate_reference,
+                       save_plan, load_plan, transport_log)
 
 # in my solution these gains were good enough for all joints but you might want to tune this.
 Kp = 300.               # proportional gain (P of PD)
@@ -27,11 +27,12 @@ def tracking_torque(robot, q, vq, reference, frames, axis, squeeze, upward):
     acceleration = a_des + Kp*error + Kv*(v_des-vq)
     torques = np.asarray(pin.rnea(robot.model, robot.data, q, vq, acceleration)).copy()
 
-    # Add the squeeze and vertical support forces at the two hands.
+    # Add the squeeze and object support forces at the two hands.
     for frame, direction in zip(frames, (-axis, axis)):
         J = pin.computeFrameJacobian(robot.model, robot.data, q, frame,
                                      pin.ReferenceFrame.LOCAL_WORLD_ALIGNED).copy()
-        force = squeeze*direction + np.array([0., 0., upward])
+        support = np.array([0., 0., upward]) if np.ndim(upward)==0 else np.asarray(upward)
+        force = squeeze*direction + support
         torques += J[:3].T @ force
     if not np.all(np.isfinite(torques)):
         raise ValueError('Non-finite torque')
@@ -47,47 +48,83 @@ def controllaw(sim, robot, trajs, tcurrent, cube):
 
 if __name__ == "__main__":
 
-    from tools import setupwithpybullet, rununtil
-    from config import DT
+    import argparse
+    from tools import setupwithpybullet, rununtil, setcubeplacement
+    from config import DT, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
+    from inverse_geometry import computeqgrasppose
+    from path import computepath
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--plan-only', action='store_true',
+                        help='Check and save a path without advancing the simulation')
+    parser.add_argument('--plan', help='Use a saved .npz path; all checks are repeated')
+    parser.add_argument('--max-iterations', type=int, default=2000,
+                        help='RRT search budget when not loading a saved plan (default: 2000)')
+    args = parser.parse_args()
 
     robot, sim, cube = setupwithpybullet()
 
     try:
         check_setup(robot, sim)
 
-        # Local lift-and-return check; qe is 2 cm above the starting grasp.
-        # Replace this local path with computepath for the full transport task.
-        lift, frames = build_lift_reference(robot, cube)
-        q0, qe = lift.points[0].copy(), lift.points[-1].copy()
-        path = [q0, qe]
+        q0, successinit = computeqgrasppose(robot, robot.q0.copy(), cube, CUBE_PLACEMENT, None)
+        qe, successend = computeqgrasppose(robot, robot.q0.copy(), cube, CUBE_PLACEMENT_TARGET, None)
+        if not (successinit and successend):
+            raise RuntimeError('Initial or goal grasp solve failed')
 
-        #setting initial configuration
-        sim.setqsim(q0)
-        check_initial_state(sim, q0)
+        cube_path = []
+        try:
+            if args.plan:
+                path, cube_path = load_plan(args.plan)
+            else:
+                path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET,
+                                   robot=robot, cube=cube, cube_path_out=cube_path,
+                                   max_iterations=args.max_iterations)
+            if len(path) < 2:
+                raise RuntimeError('Planner did not return a usable path')
 
-        #0 init and end velocities
-        def maketraj(path, T):
-            return PathTrajectory(path, max_velocity=.12,
-                                  max_acceleration=.25, min_segment_time=T)
+            #0 init and end velocities
+            def maketraj(path, cube_path):
+                return PlannedTrajectory(path, cube_path, q0, qe,
+                                         CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET)
 
-        outward = maketraj(path, 3.)
-        with cycle_log(__file__, robot) as (writer, stream):
-            trajs = ControlCycle(robot, sim, outward, frames, writer, tracking_torque)
-            steps = int(np.ceil(trajs.duration/DT))
-            total_time = steps*DT
-            tcur = 0.
-            step = 0
+            trajectory = maketraj(path, cube_path)
+            try:
+                frames, stats = validate_reference(robot, cube, trajectory)
+            except Exception as exc:
+                save_plan(__file__, trajectory, dict(preflight_passed=False,
+                          error=str(exc), configurations=len(path)))
+                raise
+            stats['preflight_passed'] = True
+            filename = save_plan(__file__, trajectory, stats)
+        finally:
+            setcubeplacement(robot, cube, CUBE_PLACEMENT)
 
-            while step < steps:
-                rununtil(controllaw, DT, sim, robot, trajs, tcur, cube)
-                if step % max(1, round(.5/DT)) == 0:
-                    stream.flush()
-                step += 1
-                tcur = step*DT
+        if args.plan_only:
+            print('[PLAN] Checks passed. No simulation steps executed.')
+            print('[PLAN] Inspect the saved plan/report before running physical transport.')
+        else:
+            #setting initial configuration
+            sim.setqsim(q0)
+            check_initial_state(sim, q0)
 
-            trajs.update(sim, robot, tcur, apply=False)
+            with transport_log(__file__, robot) as (writer, stream):
+                trajs = TransportCycle(robot, sim, trajectory, frames, writer, tracking_torque)
+                steps = int(np.ceil(trajs.duration/DT))
+                total_time = steps*DT
+                tcur = 0.
+                step = 0
 
-        print_result(trajs, total_time)
+                while step < steps:
+                    rununtil(controllaw, DT, sim, robot, trajs, tcur, cube)
+                    if step % max(1, round(.5/DT)) == 0:
+                        stream.flush()
+                    step += 1
+                    tcur = step*DT
+
+                trajs.update(sim, robot, tcur, apply=False)
+
+            trajs.report()
     except Exception as exc:
         print(f'[CONTROL STOPPED] {type(exc).__name__}: {exc}')
         raise
