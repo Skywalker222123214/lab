@@ -5,122 +5,15 @@ Created on Thu Sep 21 11:44:32 2023
 
 @author: stonneau
 """
+import time
 
 import pinocchio as pin
 import numpy as np
-from numpy.linalg import pinv
+from numpy.linalg import norm
+
 from inverse_geometry import computeqgrasppose
 from config import LEFT_HAND, RIGHT_HAND, LEFT_HOOK, RIGHT_HOOK
-from numpy.linalg import norm 
-import time
 from tools import collision, jointlimitsviolated, setcubeplacement
-DEBUG = False
-
-
-def debug_print(*args, **kwargs):
-    if DEBUG:
-        print(*args, **kwargs)
-
-# Diagnostic additions: the planning equations and acceptance thresholds below
-# are unchanged. Only printing and failure bookkeeping have been changed.
-import io
-from collections import Counter
-from contextlib import redirect_stdout
-
-DIAG = Counter()
-COLLISION_COUNTS = Counter()
-LAST_FAILURE = {}
-
-
-def record_collisions(robot, stage):
-    """Read results immediately after collision(robot, q) returned True."""
-    for pair, result in zip(
-        robot.collision_model.collisionPairs,
-        robot.collision_data.collisionResults
-    ):
-        if result.isCollision():
-            first = robot.collision_model.geometryObjects[pair.first].name
-            second = robot.collision_model.geometryObjects[pair.second].name
-            names = tuple(sorted((str(first), str(second))))
-            COLLISION_COUNTS[(stage, names)] += 1
-
-
-def grasp_errors(robot, cube, q, cube_pose):
-    pin.framesForwardKinematics(cube.model, cube.data, cube.q0)
-    pin.framesForwardKinematics(robot.model, robot.data, q)
-    positions, angles = [], []
-    for hand, hook in ((LEFT_HAND, LEFT_HOOK), (RIGHT_HAND, RIGHT_HOOK)):
-        actual = robot.data.oMf[robot.model.getFrameId(hand)].copy()
-        desired = cube_pose * cube.data.oMf[cube.model.getFrameId(hook)]
-        relative = actual.inverse() * desired
-        positions.append(float(norm(relative.translation)))
-        angles.append(float(norm(pin.log(relative).vector[3:])))
-    return max(positions), max(angles)
-
-
-def solve_grasp_quiet(robot, qcurrent, cube, cubetarget, viz=None, *, stage='endpoint'):
-    """Keep the existing IK unchanged; silence only its stdout, not exceptions."""
-    DIAG[f'{stage}.ik_calls'] += 1
-    if DEBUG:
-        q, success = computeqgrasppose(robot, qcurrent, cube, cubetarget, viz)
-    else:
-        with redirect_stdout(io.StringIO()):
-            q, success = computeqgrasppose(robot, qcurrent, cube, cubetarget, viz)
-
-    if success:
-        return q, success
-
-    if q is None or not np.all(np.isfinite(q)):
-        DIAG[f'{stage}.ik_invalid_result'] += 1
-        return q, success
-
-    position, angle = grasp_errors(robot, cube, q, cubetarget)
-    LAST_FAILURE[f'{stage}.ik'] = f'position={position:.6g}m, angle={angle:.6g}rad'
-    # These diagnostic thresholds match the user's current IK/edge tolerances.
-    if position >= 1e-3 or angle >= 1e-3:
-        DIAG[f'{stage}.ik_not_aligned'] += 1
-    else:
-        setcubeplacement(robot, cube, cubetarget)
-        if collision(robot, q):
-            DIAG[f'{stage}.ik_collision'] += 1
-            record_collisions(robot, f'{stage}.ik')
-        else:
-            DIAG[f'{stage}.ik_other_failure'] += 1
-    return q, success
-
-
-def report_progress(G, q_goal, cube_goal, iteration, maximum):
-    best_q = min(distance(node[1], q_goal) for node in G)
-    best_cube = min(norm(node[2].translation - cube_goal.translation) for node in G)
-    print(
-        f'[RRT] {iteration}/{maximum} nodes={len(G)} '
-        f'best_q={best_q:.4f} best_cube={best_cube:.4f}m '
-        f'step_failed={DIAG["step_failed"]} '
-        f'growth_edge_failed={DIAG["growth_edge_failed"]} '
-        f'goal_attempts={DIAG["goal_attempts"]}'
-    )
-
-
-def report_final(G, q_goal, cube_goal, iteration, maximum):
-    report_progress(G, q_goal, cube_goal, iteration, maximum)
-    print('[Diagnostics: counts overlap; one attempt can contribute to several counters]')
-    for name, count in sorted(DIAG.items()):
-        if count:
-            print(f'  {name}: {count}')
-    print('[Last failure details by stage]')
-    for name, detail in sorted(LAST_FAILURE.items()):
-        print(f'  {name}: {detail}')
-    if COLLISION_COUNTS:
-        print('[Most frequent collision pairs, separated by stage]')
-        for stage in sorted({key[0] for key in COLLISION_COUNTS}):
-            pairs = [(names, count) for (label, names), count in COLLISION_COUNTS.items() if label == stage]
-            for names, count in sorted(pairs, key=lambda item: item[1], reverse=True)[:3]:
-                print(f'  {stage}: {names[0]} <-> {names[1]} ({count})')
-    positions = np.array([node[2].translation for node in G])
-    print('[Tree cube-position extent]')
-    print('  min xyz:', positions.min(axis=0))
-    print('  max xyz:', positions.max(axis=0))
-
 
 def samplegrasp(
     robot, cube, qseed,
@@ -138,23 +31,19 @@ def samplegrasp(
         cube_start.translation, cube_goal.translation
     ) + np.array([0.05, 0.05, 0.15])
 
-    for attempt in range(max_attempts):
+    for _ in range(max_attempts):
 
         # First version: vary position and keep the start orientation.
         cube_sample = cube_start.copy()
         cube_sample.translation = np.random.uniform(lower, upper)
 
-        q_sample, success = solve_grasp_quiet(
-            robot, qseed, cube, cube_sample, stage="sample"
+        q_sample, success = computeqgrasppose(
+            robot, qseed, cube, cube_sample
         )
 
         if success:
-            DIAG["sample_valid"] += 1
-            debug_print(f"Valid sample found on attempt {attempt + 1}.")
             return q_sample, cube_sample, True
 
-    DIAG["sample_exhausted"] += 1
-    debug_print("No valid sample found within the attempt limit.")
     return None, None, False
 
 def distance(q1,q2):
@@ -196,24 +85,19 @@ def grasp_step(
     )
 
     # Use the previous grasp configuration as the initial guess.
-    q_next, success = solve_grasp_quiet(
-        robot, q_near, cube, cube_next, stage="step"
+    q_next, success = computeqgrasppose(
+        robot, q_near, cube, cube_next
     )
 
     if not success:
-        debug_print("Step rejected: no valid grasp found.")
         return None, None, False
 
     # Reject a large jump in the robot configuration.
     joint_step = distance(q_near, q_next)
 
     if joint_step > max_joint_step:
-        DIAG["step_joint_jump"] += 1
-        LAST_FAILURE["step_joint_jump"] = f"distance={joint_step:.6g}"
-        debug_print(f"Step rejected: joint-space jump = {joint_step:.6f}")
         return None, None, False
 
-    debug_print(f"Step accepted: joint-space change = {joint_step:.6f}")
     return q_next, cube_next, True
 
 def check_grasp_edge(
@@ -224,8 +108,7 @@ def check_grasp_edge(
     translation_resolution=0.005,
     rotation_resolution=0.05,
     position_tolerance=1e-3,
-    orientation_tolerance=1e-3,
-    context="growth"
+    orientation_tolerance=1e-3
 ):
     """Check a discretised edge and return its sampled states."""
 
@@ -269,8 +152,6 @@ def check_grasp_edge(
         cube_pose = pin.SE3.Interpolate(cube_start, cube_end, t)
 
         if jointlimitsviolated(robot, q):
-            DIAG[f"{context}.edge_joint_limits"] += 1
-            debug_print(f"Edge rejected at t={t:.3f}: joint limits.")
             return [], [], False
 
         setcubeplacement(robot, cube, cube_pose)
@@ -299,28 +180,14 @@ def check_grasp_edge(
             position_error >= position_tolerance
             or orientation_error >= orientation_tolerance
         ):
-            DIAG[f"{context}.edge_grasp"] += 1
-            LAST_FAILURE[f"{context}.edge_grasp"] = (
-                f"t={t:.6g}, position={position_error:.6g}m, "
-                f"angle={orientation_error:.6g}rad"
-            )
-            debug_print(
-                f"Edge rejected at t={t:.3f}: grasp error, "
-                f"position={position_error:.6f} m, "
-                f"orientation={orientation_error:.6f} rad"
-            )
             return [], [], False
 
         if collision(robot, q):
-            DIAG[f"{context}.edge_collision"] += 1
-            record_collisions(robot, f"{context}.edge")
-            debug_print(f"Edge rejected at t={t:.3f}: collision.")
             return [], [], False
 
         edge_qs.append(q.copy())
         edge_cubes.append(cube_pose.copy())
 
-    debug_print(f"Edge accepted at all {n_steps + 1} checked states.")
     return edge_qs, edge_cubes, True
 def connect_grasp_projected(
     robot, cube,
@@ -369,31 +236,25 @@ def connect_grasp_projected(
                 + fraction * q_goal
             )
 
-            q_next, success = solve_grasp_quiet(
-                robot, q_guess, cube, cube_next, stage="goal"
+            q_next, success = computeqgrasppose(
+                robot, q_guess, cube, cube_next
             )
 
             if not success:
-                debug_print("Goal connection failed: intermediate IK.")
                 return [], [], False
 
         # Reject jumps between different IK solutions.
         if distance(q_previous, q_next) > max_joint_step:
-            DIAG["goal_joint_jump"] += 1
-            LAST_FAILURE["goal_joint_jump"] = f"distance={distance(q_previous, q_next):.6g}, t={t:.6g}"
-            debug_print("Goal connection failed: joint-space jump.")
             return [], [], False
 
         # Check the actual small connection, including both endpoints.
         edge_qs, edge_cubes, success = check_grasp_edge(
             robot, cube,
             q_previous, q_next,
-            cube_previous, cube_next,
-            context="goal"
+            cube_previous, cube_next
         )
 
         if not success:
-            debug_print("Goal connection failed: invalid small edge.")
             return [], [], False
 
         # The first point is already stored.
@@ -418,13 +279,12 @@ def rrt(
     # Added cube poses, grasp constraints, and stored edge samples.
     G = [(None, q_init.copy(), cube_start.copy())]
     edges = {}
-    DIAG.clear()
-    COLLISION_COUNTS.clear()
-    LAST_FAILURE.clear()
 
     for iteration in range(max_iterations):
         if iteration % 200 == 0:
-            report_progress(G, q_goal, cube_goal, iteration, max_iterations)
+            print(
+                f"[RRT] {iteration}/{max_iterations}, nodes={len(G)}"
+            )
 
         # 1. Sometimes aim directly towards the goal.
         if np.random.rand() < goal_bias:
@@ -451,12 +311,10 @@ def rrt(
         )
 
         if not step_success:
-            DIAG["step_failed"] += 1
             continue
 
         # Avoid adding a node that makes essentially no progress.
         if distance(q_near, q_new) < 1e-6:
-            DIAG["no_progress"] += 1
             continue
 
         # 4. Check the connection before adding the node.
@@ -467,7 +325,6 @@ def rrt(
         )
 
         if not edge_success:
-            DIAG["growth_edge_failed"] += 1
             continue
 
         # 5. Save the new node and its checked incoming edge.
@@ -481,14 +338,7 @@ def rrt(
 
         edges[new_index] = (edge_qs, edge_cubes)
 
-        debug_print(
-            f"RRT iteration {iteration + 1}: "
-            f"added node {new_index}, "
-            f"tree size = {len(G)}"
-        )
-
         # 6. Try to connect this node to the EXACT goal configuration.
-        DIAG["goal_attempts"] += 1
         goal_qs, goal_cubes, goal_success = connect_grasp_projected(
             robot, cube,
             q_new, q_goal,
@@ -506,12 +356,8 @@ def rrt(
 
             edges[goal_index] = (goal_qs, goal_cubes)
 
-            report_final(G, q_goal, cube_goal, iteration + 1, max_iterations)
-            print(f"Path found! Tree contains {len(G)} nodes.")
             return G, edges, True
 
-    report_final(G, q_goal, cube_goal, max_iterations, max_iterations)
-    print(f"No path found within {max_iterations} RRT iterations.")
     return G, edges, False
 
 
@@ -611,10 +457,9 @@ def displaypath(robot, path, dt, viz, cube=None, cube_path=None):
 
 
 if __name__ == "__main__":
-    from tools import setupwithmeshcat, setcubeplacement
+    from tools import setupwithmeshcat
     from setup_meshcat import updatevisuals
     from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from inverse_geometry import computeqgrasppose
 
     # 1. Load the robot, cube, and visualizer.
     robot, cube, viz = setupwithmeshcat()
@@ -622,25 +467,13 @@ if __name__ == "__main__":
     q_seed = robot.q0.copy()
 
     # 2. Compute the initial grasp configuration.
-    print("\n--- Computing initial grasp ---")
-
-    q0, successinit = solve_grasp_quiet(
-        robot,
-        q_seed,
-        cube,
-        CUBE_PLACEMENT,
-        viz
+    q0, successinit = computeqgrasppose(
+        robot, q_seed, cube, CUBE_PLACEMENT, viz
     )
 
     # 3. Compute the goal grasp configuration.
-    print("\n--- Computing goal grasp ---")
-
-    qe, successend = solve_grasp_quiet(
-        robot,
-        q_seed,
-        cube,
-        CUBE_PLACEMENT_TARGET,
-        viz
+    qe, successend = computeqgrasppose(
+        robot, q_seed, cube, CUBE_PLACEMENT_TARGET, viz
     )
 
     print("Initial grasp success:", successinit)
@@ -668,11 +501,9 @@ if __name__ == "__main__":
         cube_path_out=cube_path
     )
 
-    print("Path found:", bool(path))
-    print("Path configurations:", len(path))
-
     # 6. Play the returned path through the display entry point.
     if path:
+        print(f"Path found: {len(path)} configurations.")
         displaypath(
             robot, path, dt=0.03, viz=viz,
             cube=cube, cube_path=cube_path
@@ -681,4 +512,4 @@ if __name__ == "__main__":
         setcubeplacement(robot, cube, CUBE_PLACEMENT)
         pin.framesForwardKinematics(robot.model, robot.data, q0)
         updatevisuals(viz, robot, cube, q0)
-        print("No path to display; showing the initial pose.")
+        print("No path found; showing the initial pose.")
