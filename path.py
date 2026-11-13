@@ -15,6 +15,37 @@ from inverse_geometry import computeqgrasppose
 from config import LEFT_HAND, RIGHT_HAND, LEFT_HOOK, RIGHT_HOOK
 from tools import collision, jointlimitsviolated, setcubeplacement
 
+# Minimum nominal obstacle clearances in metres; validate in dynamics too.
+OBSTACLE_CLEARANCE_REQUIREMENTS = {'robot': 0.002, 'cube': 0.008}
+
+
+def obstacle_clearance(robot):
+    """Return minimum robot/cube distances to the configured obstacle.
+
+    Call after collision(robot, q) has updated the geometry placements.
+    """
+    model, data = robot.collision_model, robot.collision_data
+    obstacle = model.getGeometryId('obstaclebase_0')
+    cube = model.getGeometryId('cubebase_0')
+    if max(obstacle, cube) >= len(model.geometryObjects):
+        raise RuntimeError('Required obstacle or cube geometry is missing.')
+
+    minimum = {'robot': np.inf, 'cube': np.inf}
+    for index, pair in enumerate(model.collisionPairs):
+        if pair.first != obstacle and pair.second != obstacle:
+            continue
+        other = pair.second if pair.first == obstacle else pair.first
+        component = 'cube' if other == cube else 'robot'
+        separation = float(pin.computeDistance(model, data, index).min_distance)
+        if not np.isfinite(separation):
+            raise RuntimeError('Non-finite obstacle distance.')
+        minimum[component] = min(minimum[component], separation)
+
+    if any(not np.isfinite(value) for value in minimum.values()):
+        raise RuntimeError('Missing robot/obstacle or cube/obstacle collision pairs.')
+    return minimum
+
+
 def samplegrasp(
     robot, cube, qseed,
     cube_start, cube_goal,
@@ -110,7 +141,11 @@ def check_grasp_edge(
     position_tolerance=1e-3,
     orientation_tolerance=1e-3
 ):
-    """Check a discretised edge and return its sampled states."""
+    """Return edge samples only after checking between every returned pair.
+
+    Keep output spacing separate from the finer validation spacing.
+    These are discrete checks, not a continuous collision guarantee.
+    """
 
     if min(
         joint_resolution,
@@ -139,20 +174,37 @@ def check_grasp_edge(
         int(np.ceil(norm(cube_motion[3:]) / rotation_resolution))
     )
 
+    # Extra validation points are not added to the returned waypoints.
     edge_qs = []
     edge_cubes = []
 
     # Include BOTH endpoints.
     for i in range(n_steps + 1):
         t = i / n_steps
+        edge_qs.append(((1.0 - t) * q_start + t * q_end).copy())
+        edge_cubes.append(pin.SE3.Interpolate(cube_start, cube_end, t).copy())
 
-        # Linear joint interpolation, following Tutorial 4.
-        # Additional grasp checks are specific to CW2.
-        q = (1.0 - t) * q_start + t * q_end
-        cube_pose = pin.SE3.Interpolate(cube_start, cube_end, t)
+    # Validate between every pair of returned waypoints, including the midpoint.
+    for i in range(n_steps):
+        qa, qb = edge_qs[i], edge_qs[i+1]
+        ca, cb = edge_cubes[i], edge_cubes[i+1]
+        rotation = norm(pin.log(ca.inverse() * cb).vector[3:])
+        checks = max(
+            4,
+            int(np.ceil(norm(qb-qa) / 0.005)),
+            int(np.ceil(norm(cb.translation-ca.translation) / 0.001)),
+            int(np.ceil(rotation / 0.01))
+        )
+        # An even interval count ensures that fraction=0.5 is checked.
+        checks += checks % 2
+        for fraction in np.linspace(0.0, 1.0, checks+1):
+            # Linear joint interpolation, following Tutorial 4.
+            # The paired cube and grasp checks are specific to CW2.
+            q = (1.0 - fraction) * qa + fraction * qb
+            cube_pose = pin.SE3.Interpolate(ca, cb, fraction)
 
-        if jointlimitsviolated(robot, q):
-            return [], [], False
+            if jointlimitsviolated(robot, q):
+                return [], [], False
 
         setcubeplacement(robot, cube, cube_pose)
         pin.framesForwardKinematics(robot.model, robot.data, q)
@@ -166,29 +218,28 @@ def check_grasp_edge(
         left_relative = current_left.inverse() * target_left
         right_relative = current_right.inverse() * target_right
 
-        position_error = max(
-            norm(left_relative.translation),
-            norm(right_relative.translation)
-        )
-
-        orientation_error = max(
-            norm(pin.log(left_relative).vector[3:]),
-            norm(pin.log(right_relative).vector[3:])
-        )
-
-        if (
-            position_error >= position_tolerance
-            or orientation_error >= orientation_tolerance
-        ):
-            return [], [], False
-
-        if collision(robot, q):
-            return [], [], False
+            position_error = max(
+                norm(left_relative.translation), norm(right_relative.translation)
+            )
+            orientation_error = max(
+                norm(pin.log(left_relative).vector[3:]),
+                norm(pin.log(right_relative).vector[3:])
+            )
+            if (position_error >= position_tolerance
+                    or orientation_error >= orientation_tolerance):
+                return [], [], False
+            if collision(robot, q):
+                return [], [], False
+            for component, clearance in obstacle_clearance(robot).items():
+                if clearance < OBSTACLE_CLEARANCE_REQUIREMENTS[component]:
+                    return [], [], False
 
         edge_qs.append(q.copy())
         edge_cubes.append(cube_pose.copy())
 
     return edge_qs, edge_cubes, True
+
+
 def connect_grasp_projected(
     robot, cube,
     q_start, q_goal,
@@ -282,9 +333,7 @@ def rrt(
 
     for iteration in range(max_iterations):
         if iteration % 200 == 0:
-            print(
-                f"[RRT] {iteration}/{max_iterations}, nodes={len(G)}"
-            )
+            print(f'[RRT] {iteration}/{max_iterations}, nodes={len(G)}', flush=True)
 
         # 1. Sometimes aim directly towards the goal.
         if np.random.rand() < goal_bias:
@@ -378,6 +427,28 @@ def computepath(
         raise ValueError("Pass the initialized robot and cube to computepath.")
     if cube_path_out is not None:
         cube_path_out.clear()
+    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
+        raise ValueError('max_iterations must be a positive integer')
+
+    # Reject impossible endpoint clearance before spending the search budget.
+    # This checks endpoint geometry, not global reachability of the task.
+    try:
+        for label, q, pose in [('start', qinit, cubeplacementq0),
+                               ('goal', qgoal, cubeplacementqgoal)]:
+            setcubeplacement(robot,cube,pose)
+            if jointlimitsviolated(robot,q):
+                print(f'Invalid {label}: joint-limit violation.', flush=True)
+                return []
+            if collision(robot,q):
+                print(f'Invalid {label}: collision.', flush=True)
+                return []
+            for component, clearance in obstacle_clearance(robot).items():
+                required = OBSTACLE_CLEARANCE_REQUIREMENTS[component]
+                if clearance < required:
+                    print(f'Invalid {label}: insufficient {component} clearance.', flush=True)
+                    return []
+    finally:
+        setcubeplacement(robot,cube,cubeplacementq0)
 
     G, edges, found = rrt(
         robot, cube, qinit, qgoal,

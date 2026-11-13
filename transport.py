@@ -1,7 +1,8 @@
 """Timing and contact checks for the path returned by computepath.
 
 All returned waypoints are retained. Robot and cube references share the same
-quintic progress on each segment. Cube orientation must remain constant in this
+monotone progress on each segment (QP Bezier by default; quintic for comparison).
+Cube orientation must remain constant in this
 version; rotational object dynamics are not included in the support feedforward.
 """
 import json
@@ -55,7 +56,10 @@ def check_pose(pose):
 
 
 class PlannedTrajectory:
-    def __init__(self, path, cube_path, q0, qe, start, goal):
+    def __init__(self, path, cube_path, q0, qe, start, goal, method='qp'):
+        if method not in ('qp','quintic'):
+            raise ValueError('Trajectory method must be qp or quintic')
+        self.method = method
         points = np.asarray(path, dtype=float)
         if (points.ndim != 2 or len(points)<2 or not np.all(np.isfinite(points))
                 or len(cube_path) != len(points)):
@@ -88,6 +92,13 @@ class PlannedTrajectory:
         self.joints.segment_times = times
         self.joints.knot_times = np.r_[0.,np.cumsum(times)]
         self.joints.duration = float(self.joints.knot_times[-1])
+        self.quintic_duration = self.joints.duration
+        if method == 'qp':
+            from qp_trajectory import QPSegmentTrajectory
+            self.joints = QPSegmentTrajectory(points,self.cube_deltas,times)
+            print(f'[QP] {len(times)} constrained Bezier fits; '
+                  f'duration={self.joints.duration:.3f}s; '
+                  f'KKT residual={self.joints.report["qp_stationarity_residual"]:.3g}',flush=True)
         self.duration = self.joints.duration
         self.points = self.joints.points
         self.start, self.goal = start.copy(), goal.copy()
@@ -105,6 +116,8 @@ class PlannedTrajectory:
         h = u**3*(10.-15.*u+6.*u*u)
         dh = 30.*u*u*(1.-u)**2/duration
         ddh = 60.*u*(1.-u)*(1.-2.*u)/duration**2
+        if self.method == 'qp':
+            h,dh,ddh = self.joints.progress(i,u)
         pose = self.cube_path[i].copy()
         pose.translation = pose.translation + h*self.cube_deltas[i]
         return reference,pose,dh*self.cube_deltas[i],ddh*self.cube_deltas[i]
@@ -164,8 +177,10 @@ def validate_reference(robot,cube,trajectory):
                 int(np.ceil(np.linalg.norm(trajectory.points[i+1]-trajectory.points[i])/.005)),
                 int(np.ceil(np.linalg.norm(trajectory.cube_deltas[i])/.001)))
             for u in np.linspace(0.,1.,intervals+1):
-                # h(u) covers [0,1]; check uniform geometric progress more densely
-                # than the planner, independently of playback timing.
+                # Both methods use a common monotone h in [0,1] for q and cube.
+                # The QP checks that property through its derivative control
+                # points. Uniform geometric progress covers the entire segment,
+                # independently of the chosen playback timing/profile.
                 q = (1.-u)*trajectory.points[i]+u*trajectory.points[i+1]
                 pose = trajectory.cube_path[i].copy()
                 pose.translation = pose.translation+u*trajectory.cube_deltas[i]
@@ -220,6 +235,10 @@ def validate_reference(robot,cube,trajectory):
         required_robot_obstacle_clearance_m=OBSTACLE_CLEARANCE_REQUIREMENTS['robot'],
         required_cube_obstacle_clearance_m=OBSTACLE_CLEARANCE_REQUIREMENTS['cube'],
         continuous_collision_guarantee=False)
+    stats['trajectory_method'] = trajectory.method
+    if trajectory.method == 'qp':
+        stats.update(trajectory.joints.report)
+        stats['quintic_comparison_duration_s'] = trajectory.quintic_duration
     print(f'[CHECK] passed: {checked} samples; grasp <= {max_position:.9f}m / {max_angle:.9f}rad')
     for component, clearance in minimum_clearance.items():
         print(f'[CHECK] {component} obstacle clearance >= {clearance:.6f}m '
