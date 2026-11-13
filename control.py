@@ -58,6 +58,8 @@ if __name__ == "__main__":
     parser.add_argument('--plan-only', action='store_true',
                         help='Check and save a path without advancing the simulation')
     parser.add_argument('--plan', help='Use a saved .npz path; all checks are repeated')
+    parser.add_argument('--trajectory',choices=['qp','quintic'],default='qp',
+                        help='QP Bezier fit (default), or validated quintic comparison')
     parser.add_argument('--max-iterations', type=int, default=2000,
                         help='RRT search budget when not loading a saved plan (default: 2000)')
     args = parser.parse_args()
@@ -86,7 +88,8 @@ if __name__ == "__main__":
             #0 init and end velocities
             def maketraj(path, cube_path):
                 return PlannedTrajectory(path, cube_path, q0, qe,
-                                         CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET)
+                                         CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET,
+                                         method=args.trajectory)
 
             trajectory = maketraj(path, cube_path)
             try:
