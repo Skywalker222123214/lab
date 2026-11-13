@@ -133,7 +133,7 @@ def check_grasp_edge(
     cube_motion = pin.log(cube_start.inverse() * cube_end).vector
 
     n_steps = max(
-        1,
+        4,
         int(np.ceil(distance(q_start, q_end) / joint_resolution)),
         int(np.ceil(norm(cube_motion[:3]) / translation_resolution)),
         int(np.ceil(norm(cube_motion[3:]) / rotation_resolution))
