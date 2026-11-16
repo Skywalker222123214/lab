@@ -10,7 +10,7 @@ import time
 import pinocchio as pin
 import numpy as np
 from numpy.linalg import norm
-
+from scipy.spatial import KDTree
 from inverse_geometry import computeqgrasppose
 from config import LEFT_HAND, RIGHT_HAND, LEFT_HOOK, RIGHT_HOOK
 from tools import collision, jointlimitsviolated, setcubeplacement
@@ -96,6 +96,36 @@ def NEAREST_VERTEX(G, q_rand):
     for i, node in enumerate(G[1:], start=1):
         candidate_distance = distance(node[1], q_rand)
 
+        if candidate_distance < nearest_distance:
+            nearest_distance = candidate_distance
+            nearest_index = i
+
+    return nearest_index
+def NEAREST_VERTEX_KD(G, q_rand, nearest_data, rebuild_every=64):
+    """Find an exact nearest node while G grows only by appending nodes.
+
+    Reuse nearest_data within one RRT search. Query the indexed nodes and
+    scan newer nodes, rebuilding the index after rebuild_every additions.
+    """
+    if not G:
+        raise ValueError("The tree must contain at least one node.")
+    indexed_count = nearest_data.get("indexed_count", 0)
+    if (
+        nearest_data.get("tree") is None
+        or len(G) - indexed_count >= rebuild_every
+    ):
+        configurations = np.array([node[1] for node in G])
+        nearest_data["tree"] = KDTree(configurations)
+        nearest_data["indexed_count"] = len(G)
+
+    nearest_distance, nearest_index = nearest_data["tree"].query(
+    q_rand, k=1, p=2, eps=0
+    )
+    nearest_index = int(nearest_index)
+
+    # Nodes appended after the last rebuild are still searched exactly.
+    for i in range(nearest_data["indexed_count"], len(G)):
+        candidate_distance = distance(G[i][1], q_rand)
         if candidate_distance < nearest_distance:
             nearest_distance = candidate_distance
             nearest_index = i
@@ -209,37 +239,34 @@ def check_grasp_edge(
             if jointlimitsviolated(robot, q):
                 return [], [], False
 
-        setcubeplacement(robot, cube, cube_pose)
-        pin.framesForwardKinematics(robot.model, robot.data, q)
+            setcubeplacement(robot, cube, cube_pose)
+            pin.framesForwardKinematics(robot.model, robot.data, q)
 
-        current_left = robot.data.oMf[left_hand_id].copy()
-        current_right = robot.data.oMf[right_hand_id].copy()
+            current_left = robot.data.oMf[left_hand_id].copy()
+            current_right = robot.data.oMf[right_hand_id].copy()
 
-        target_left = cube_pose * cube_to_left
-        target_right = cube_pose * cube_to_right
+            target_left = cube_pose * cube_to_left
+            target_right = cube_pose * cube_to_right
 
-        left_relative = current_left.inverse() * target_left
-        right_relative = current_right.inverse() * target_right
+            left_relative = current_left.inverse() * target_left
+            right_relative = current_right.inverse() * target_right
 
             position_error = max(
-                norm(left_relative.translation), norm(right_relative.translation)
-            )
+                    norm(left_relative.translation), norm(right_relative.translation)
+                )
             orientation_error = max(
-                norm(pin.log(left_relative).vector[3:]),
-                norm(pin.log(right_relative).vector[3:])
-            )
+                    norm(pin.log(left_relative).vector[3:]),
+                    norm(pin.log(right_relative).vector[3:])
+                )
             if (position_error >= position_tolerance
-                    or orientation_error >= orientation_tolerance):
+                        or orientation_error >= orientation_tolerance):
                 return [], [], False
             if collision(robot, q):
                 return [], [], False
             for component, (clearance, _) in obstacle_clearance(robot).items():
                 if clearance < OBSTACLE_CLEARANCE_REQUIREMENTS[component]:
                     return [], [], False
-
-        edge_qs.append(q.copy())
-        edge_cubes.append(cube_pose.copy())
-
+                
     return edge_qs, edge_cubes, True
 
 
@@ -333,7 +360,7 @@ def rrt(
     # Added cube poses, grasp constraints, and stored edge samples.
     G = [(None, q_init.copy(), cube_start.copy())]
     edges = {}
-
+    nearest_data = {}
     for iteration in range(max_iterations):
         if iteration % 200 == 0:
             print(f'[RRT] {iteration}/{max_iterations}, nodes={len(G)}', flush=True)
@@ -352,7 +379,7 @@ def rrt(
                 continue
 
         # 2. Find the nearest existing node.
-        near_index = NEAREST_VERTEX(G, q_rand)
+        near_index = NEAREST_VERTEX_KD(G, q_rand,nearest_data)
         q_near = G[near_index][1]
         cube_near = G[near_index][2]
 
@@ -424,14 +451,14 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal):
     """
     from setup_pinocchio import setuppinocchio
     robot, _, _, cube = setuppinocchio()
-    return computepath_with_context(qinit, qgoal, cubeplacementq0, cubeplacementqgoal,
+    return plan_grasp_path(qinit, qgoal, cubeplacementq0, cubeplacementqgoal,
                                    robot=robot, cube=cube)
 
 
-def computepath_with_context(
+def plan_grasp_path(
     qinit, qgoal, cubeplacementq0, cubeplacementqgoal,
     robot=None, cube=None,
-    max_iterations=2000, goal_bias=0.2,
+    max_iterations=4000, goal_bias=0.2,
     cube_path_out=None
 ):
     """Return a list of checked configurations, or [] on planning failure.
@@ -579,7 +606,7 @@ if __name__ == "__main__":
     # 5. Plan through the coursework entry point.
     print("\n--- Computing path ---")
     cube_path = []
-    path = computepath_with_context(
+    path = plan_grasp_path(
         q0, qe,
         CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET,
         robot=robot, cube=cube,

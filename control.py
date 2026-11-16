@@ -202,7 +202,7 @@ if __name__ == "__main__":
     from tools import setupwithpybullet,rununtil,setcubeplacement
     from config import DT,CUBE_PLACEMENT,CUBE_PLACEMENT_TARGET
     from inverse_geometry import computeqgrasppose
-    from path import computepath_with_context
+    from path import plan_grasp_path
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--plan-only',action='store_true',
@@ -252,7 +252,7 @@ if __name__ == "__main__":
                           actual_start_xyzquat=pin.SE3ToXYZQUAT(cube_start_actual).tolist())
         cube_path = []
         try:
-            path = computepath_with_context(q0,qe,cube_start_actual,CUBE_PLACEMENT_TARGET,
+            path = plan_grasp_path(q0,qe,cube_start_actual,CUBE_PLACEMENT_TARGET,
                                robot=robot,cube=cube,cube_path_out=cube_path,
                                max_iterations=args.max_iterations)
             if len(path)<2:
