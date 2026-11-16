@@ -209,7 +209,7 @@ if __name__ == "__main__":
                         help='Physically settle and replan; do not initialize/execute the grasp')
     parser.add_argument('--plan',help='Deprecated: measured-start runs always require fresh planning')
     parser.add_argument('--trajectory',choices=['qp','quintic'],default='qp')
-    parser.add_argument('--max-iterations',type=int,default=2000)
+    parser.add_argument('--max-iterations',type=int,default=4000)
     parser.add_argument('--settle-timeout',type=float,default=3.)
     parser.add_argument('--seed',type=int,help='Optional reproducible RRT seed')
     parser.add_argument('--headless',action='store_true',help='Use Bullet DIRECT display mode')

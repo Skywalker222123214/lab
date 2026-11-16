@@ -63,7 +63,7 @@ def samplegrasp(
 
     upper = np.maximum(
         cube_start.translation, cube_goal.translation
-    ) + np.array([0.05, 0.05, 0.15])
+    ) + np.array([0.05, 0.05, 0.20])
 
     for _ in range(max_attempts):
 
@@ -201,7 +201,7 @@ def check_grasp_edge(
     cube_motion = pin.log(cube_start.inverse() * cube_end).vector
 
     n_steps = max(
-        4,
+        1,
         int(np.ceil(distance(q_start, q_end) / joint_resolution)),
         int(np.ceil(norm(cube_motion[:3]) / translation_resolution)),
         int(np.ceil(norm(cube_motion[3:]) / rotation_resolution))
@@ -223,7 +223,7 @@ def check_grasp_edge(
         ca, cb = edge_cubes[i], edge_cubes[i+1]
         rotation = norm(pin.log(ca.inverse() * cb).vector[3:])
         checks = max(
-            1,
+            4,
             int(np.ceil(norm(qb-qa) / 0.005)),
             int(np.ceil(norm(cb.translation-ca.translation) / 0.001)),
             int(np.ceil(rotation / 0.01))

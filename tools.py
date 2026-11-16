@@ -100,11 +100,10 @@ def setupwithpybulletandmeshcat(url=MESHCAT_URL):
 import time
    
 def rununtil(f, t, *args, **kwargs):
-    '''starts a timer, runs a function f then waits until t seconds have passed since timer started'''
-    t = time.perf_counter()
-    # Call the provided function f2 with its arguments
+    """Run f, then wait until t seconds have elapsed since the call began."""
+    deadline = time.perf_counter() + t
     result = f(*args, **kwargs)
-    t+=0.001
-    while(time.perf_counter()-t<0.001):
-        time.sleep(0.0001) # Weird loop for parallel execution (should not be needed in this project)
+    remaining = deadline - time.perf_counter()
+    if remaining > 0:
+        time.sleep(remaining)
     return result

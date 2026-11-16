@@ -239,7 +239,7 @@ def main():
     parser.add_argument('--seeds', type=int, nargs='+', help='Repeat selected cases for each seed')
     parser.add_argument('--plan-only', action='store_true')
     parser.add_argument('--gui', action='store_true', help='Show Bullet; default is DIRECT')
-    parser.add_argument('--max-iterations', type=int, default=2000)
+    parser.add_argument('--max-iterations', type=int, default=4000)
     parser.add_argument('--timeout', type=float, default=1200., help='Wall-clock seconds per case')
     parser.add_argument('--stop-on-failure', action='store_true')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
