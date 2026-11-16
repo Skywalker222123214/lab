@@ -20,17 +20,15 @@ OBSTACLE_CLEARANCE_REQUIREMENTS = {'robot': 0.002, 'cube': 0.008}
 
 
 def obstacle_clearance(robot):
-    """Return minimum robot/cube distances to the configured obstacle.
+    """Return minimum robot/cube (distance, pair name) entries.
 
     Call after collision(robot, q) has updated the geometry placements.
     """
     model, data = robot.collision_model, robot.collision_data
     obstacle = model.getGeometryId('obstaclebase_0')
     cube = model.getGeometryId('cubebase_0')
-    if max(obstacle, cube) >= len(model.geometryObjects):
-        raise RuntimeError('Required obstacle or cube geometry is missing.')
 
-    minimum = {'robot': np.inf, 'cube': np.inf}
+    minimum = {'robot': (np.inf, None), 'cube': (np.inf, None)}
     for index, pair in enumerate(model.collisionPairs):
         if pair.first != obstacle and pair.second != obstacle:
             continue
@@ -39,9 +37,14 @@ def obstacle_clearance(robot):
         separation = float(pin.computeDistance(model, data, index).min_distance)
         if not np.isfinite(separation):
             raise RuntimeError('Non-finite obstacle distance.')
-        minimum[component] = min(minimum[component], separation)
+        if separation < minimum[component][0]:
+            pair_name = (
+                f'{model.geometryObjects[pair.first].name} <-> '
+                f'{model.geometryObjects[pair.second].name}'
+            )
+            minimum[component] = (separation, pair_name)
 
-    if any(not np.isfinite(value) for value in minimum.values()):
+    if any(pair_name is None for _, pair_name in minimum.values()):
         raise RuntimeError('Missing robot/obstacle or cube/obstacle collision pairs.')
     return minimum
 
@@ -230,7 +233,7 @@ def check_grasp_edge(
                 return [], [], False
             if collision(robot, q):
                 return [], [], False
-            for component, clearance in obstacle_clearance(robot).items():
+            for component, (clearance, _) in obstacle_clearance(robot).items():
                 if clearance < OBSTACLE_CLEARANCE_REQUIREMENTS[component]:
                     return [], [], False
 
@@ -412,7 +415,20 @@ def rrt(
 
 #returns a collision free path from qinit to qgoal under grasping constraints
 #the path is expressed as a list of configurations
-def computepath(
+def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal):
+    """Coursework API: return a checked path using exactly the four inputs.
+
+    The standalone grading call does not supply model objects. Load the same
+    configured geometric scene without starting Meshcat or a physics engine.
+    Part 2 reuses the identical implementation with its existing model objects.
+    """
+    from setup_pinocchio import setuppinocchio
+    robot, _, _, cube = setuppinocchio()
+    return computepath_with_context(qinit, qgoal, cubeplacementq0, cubeplacementqgoal,
+                                   robot=robot, cube=cube)
+
+
+def computepath_with_context(
     qinit, qgoal, cubeplacementq0, cubeplacementqgoal,
     robot=None, cube=None,
     max_iterations=2000, goal_bias=0.2,
@@ -442,7 +458,7 @@ def computepath(
             if collision(robot,q):
                 print(f'Invalid {label}: collision.', flush=True)
                 return []
-            for component, clearance in obstacle_clearance(robot).items():
+            for component, (clearance, _) in obstacle_clearance(robot).items():
                 required = OBSTACLE_CLEARANCE_REQUIREMENTS[component]
                 if clearance < required:
                     print(f'Invalid {label}: insufficient {component} clearance.', flush=True)
@@ -563,7 +579,7 @@ if __name__ == "__main__":
     # 5. Plan through the coursework entry point.
     print("\n--- Computing path ---")
     cube_path = []
-    path = computepath(
+    path = computepath_with_context(
         q0, qe,
         CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET,
         robot=robot, cube=cube,
