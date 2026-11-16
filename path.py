@@ -223,7 +223,7 @@ def check_grasp_edge(
         ca, cb = edge_cubes[i], edge_cubes[i+1]
         rotation = norm(pin.log(ca.inverse() * cb).vector[3:])
         checks = max(
-            4,
+            1,
             int(np.ceil(norm(qb-qa) / 0.005)),
             int(np.ceil(norm(cb.translation-ca.translation) / 0.001)),
             int(np.ceil(rotation / 0.01))
@@ -610,7 +610,7 @@ if __name__ == "__main__":
         q0, qe,
         CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET,
         robot=robot, cube=cube,
-        max_iterations=2000,
+        max_iterations=4000,
         goal_bias=0.2,
         cube_path_out=cube_path
     )
