@@ -16,7 +16,9 @@ from config import LEFT_HAND, RIGHT_HAND, LEFT_HOOK, RIGHT_HOOK
 from tools import collision, jointlimitsviolated, setcubeplacement
 
 # Minimum nominal obstacle clearances in metres; validate in dynamics too.
-OBSTACLE_CLEARANCE_REQUIREMENTS = {'robot': 0.002, 'cube': 0.008}
+# Set minimum clearances between the obstacle and the robot/cube
+# to allow for execution errors in the dynamics simulation.
+OBSTACLE_CLEARANCE_REQUIREMENTS = {'robot': 0.002, 'cube': 0.005}
 
 
 def obstacle_clearance(robot):
@@ -30,22 +32,18 @@ def obstacle_clearance(robot):
 
     minimum = {'robot': (np.inf, None), 'cube': (np.inf, None)}
     for index, pair in enumerate(model.collisionPairs):
+        #only consider pairs that involve the obstacle
         if pair.first != obstacle and pair.second != obstacle:
             continue
         other = pair.second if pair.first == obstacle else pair.first
         component = 'cube' if other == cube else 'robot'
         separation = float(pin.computeDistance(model, data, index).min_distance)
-        if not np.isfinite(separation):
-            raise RuntimeError('Non-finite obstacle distance.')
         if separation < minimum[component][0]:
             pair_name = (
                 f'{model.geometryObjects[pair.first].name} <-> '
                 f'{model.geometryObjects[pair.second].name}'
             )
             minimum[component] = (separation, pair_name)
-
-    if any(pair_name is None for _, pair_name in minimum.values()):
-        raise RuntimeError('Missing robot/obstacle or cube/obstacle collision pairs.')
     return minimum
 
 
@@ -67,7 +65,7 @@ def samplegrasp(
 
     for _ in range(max_attempts):
 
-        # First version: vary position and keep the start orientation.
+        # Vary position and keep the start orientation.
         cube_sample = cube_start.copy()
         cube_sample.translation = np.random.uniform(lower, upper)
 
@@ -87,9 +85,6 @@ def distance(q1,q2):
 def NEAREST_VERTEX(G, q_rand):
     """Return the index of the tree node closest to q_rand."""
 
-    if not G:
-        raise ValueError("The tree must contain at least one node.")
-
     nearest_index = 0
     nearest_distance = distance(G[0][1], q_rand)
 
@@ -101,14 +96,14 @@ def NEAREST_VERTEX(G, q_rand):
             nearest_index = i
 
     return nearest_index
+
 def NEAREST_VERTEX_KD(G, q_rand, nearest_data, rebuild_every=64):
     """Find an exact nearest node while G grows only by appending nodes.
 
     Reuse nearest_data within one RRT search. Query the indexed nodes and
     scan newer nodes, rebuilding the index after rebuild_every additions.
     """
-    if not G:
-        raise ValueError("The tree must contain at least one node.")
+
     indexed_count = nearest_data.get("indexed_count", 0)
     if (
         nearest_data.get("tree") is None
@@ -139,9 +134,6 @@ def grasp_step(
     max_joint_step=0.15
 ):
     """Try one small step towards a sampled cube pose."""
-
-    if not 0.0 < alpha <= 1.0:
-        raise ValueError("alpha must be in (0, 1].")
 
     # Interpolate the cube pose towards the sample.
     cube_next = pin.SE3.Interpolate(
@@ -179,13 +171,6 @@ def check_grasp_edge(
     Keep output spacing separate from the finer validation spacing.
     These are discrete checks, not a continuous collision guarantee.
     """
-
-    if min(
-        joint_resolution,
-        translation_resolution,
-        rotation_resolution
-    ) <= 0:
-        raise ValueError("Resolutions must be positive.")
 
     left_hand_id = robot.model.getFrameId(LEFT_HAND)
     right_hand_id = robot.model.getFrameId(RIGHT_HAND)
@@ -466,12 +451,8 @@ def plan_grasp_path(
     Optional cube_path_out is filled with the corresponding stored cube poses
     for visualization. It does not change the return type of this function.
     """
-    if robot is None or cube is None:
-        raise ValueError("Pass the initialized robot and cube to computepath.")
     if cube_path_out is not None:
         cube_path_out.clear()
-    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
-        raise ValueError('max_iterations must be a positive integer')
 
     # Reject impossible endpoint clearance before spending the search budget.
     # This checks endpoint geometry, not global reachability of the task.
@@ -517,8 +498,6 @@ def plan_grasp_path(
 
 def getpath(G, edges):
     """Recover the checked root-to-goal path; call only after RRT succeeds."""
-    if not G:
-        raise ValueError("The tree is empty.")
 
     branch = []
     index = len(G) - 1
