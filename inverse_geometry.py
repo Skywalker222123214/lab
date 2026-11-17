@@ -14,10 +14,6 @@ from config import LEFT_HOOK, RIGHT_HOOK, LEFT_HAND, RIGHT_HAND, EPSILON
 from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
 
 from tools import setcubeplacement
-DEBUG = False
-def debug_print(*args, **kwargs):
-    if DEBUG:
-        print(*args, **kwargs)
 
 def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
     """Find a grasp configuration using iterative inverse kinematics."""
@@ -46,12 +42,12 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
 
     for iteration in range(max_iterations + 1):
 
-        # 1. Compute the current hand poses.
+        # Compute the current hand poses.
         pin.framesForwardKinematics(robot.model, robot.data, q)
         current_left = robot.data.oMf[left_hand_id].copy()
         current_right = robot.data.oMf[right_hand_id].copy()
 
-        # 2. Compute the pose errors.
+        # Compute the pose errors.
         left_relative = current_left.inverse() * target_left
         right_relative = current_right.inverse() * target_right
 
@@ -70,21 +66,11 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
             norm(error_right[3:])
             )
 
-        if iteration % 50 == 0:
-            debug_print(
-                f"Iteration {iteration}: "
-                f"position = {position_error:.6f} m, "
-                f"orientation = {orientation_error:.6f} rad"
-            )
-
-        # 3. Stop if both hands are aligned.
+        # Stop if both hands are aligned.
         if (position_error < position_tolerance
             and orientation_error < orientation_tolerance):
 
             in_collision = collision(robot, q)
-
-            debug_print(f"Hands aligned after {iteration} iterations.")
-            debug_print("Collision:", in_collision)
 
             return q, not in_collision
 
@@ -92,7 +78,7 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
         if iteration == max_iterations:
             break
 
-        # 4. Compute the hand Jacobians.
+        # Compute the hand Jacobians.
         J_hand_left = pin.computeFrameJacobian(
             robot.model,
             robot.data,
@@ -118,7 +104,6 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
         q = pin.integrate(robot.model, q, step_size * dq)
         q = projecttojointlimits(robot, q)
 
-    debug_print("Reached the iteration limit without aligning both hands.")
     return q, False
             
 if __name__ == "__main__":
